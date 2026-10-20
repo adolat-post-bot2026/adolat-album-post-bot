@@ -84,7 +84,7 @@ def create_telegraph_page(full_text: str) -> str:
     if not content:
         content = [{"tag": "p", "children": ["Матн берилмаган."]}]
 
-    response = requests.post(
+        response = requests.post(
         "https://api.telegra.ph/createPage",
         data={
             "access_token": access_token,
@@ -94,3 +94,12 @@ def create_telegraph_page(full_text: str) -> str:
             "return_content": "false",
         },
         timeout=30,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError(
+            "Telegraph maqolasi yaratilmadi: "
+            + str(result.get("error", "noma'lum xato"))
+        )
+    return result["result"]["url"]
