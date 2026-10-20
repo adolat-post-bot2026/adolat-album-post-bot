@@ -64,13 +64,16 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     for photo_id in photos[:10]
                 ]
 
-                await context.bot.send_media_group(
+              
+                sent_album = await context.bot.send_media_group(
                     chat_id=CHANNEL_ID,
                     media=media,
                     reply_to_message_id=(
-                        text_message.message_id if text_message else None
+                        text_message.message_id
+                        if text_message else None
                     )
                 )
+
 
            
             albums.pop(user_id, None)
