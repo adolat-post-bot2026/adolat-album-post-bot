@@ -23,9 +23,11 @@ albums = {}
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         
+            
             "Аввал 1–10 та сурат юборинг. "
             "Кейин мақоланинг тўлиқ матнини юборинг. "
             "Тугатгач /done буйруғини беринг."
+
 
     )
 
