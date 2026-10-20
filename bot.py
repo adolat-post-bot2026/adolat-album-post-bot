@@ -1,6 +1,7 @@
+
 import os
+import json
 import asyncio
-import html
 import requests
 
 from telegram import Update, InputMediaPhoto
@@ -16,15 +17,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TELEGRAPH_ACCESS_TOKEN = os.getenv("TELEGRAPH_ACCESS_TOKEN", "").strip()
 
-# Har bir foydalanuvchi yuborgan matn va suratlarni vaqtincha saqlash
 albums = {}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Аввал тўлиқ матнни юборинг, кейин 1–10 тагача сурат юборинг. "
-        "Тугатгач /done буйруғини беринг. "
-        "Матн Telegraph мақоласига жойланади, каналга суратлар ва мақола ҳаволаси чиқади."
+        "Аввал тўлиқ матнни юборинг, кейин 1–10 та сурат юборинг. "
+        "Тугатгач /done буйруғини беринг."
     )
 
 
@@ -44,12 +43,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.photo:
         albums[user_id]["photos"].append(message.photo[-1].file_id)
         await message.reply_text(
-            f"Сурат қабул қилинди. Жами суратлар: {len(albums[user_id]['photos'])}"
+            f"Сурат қабул қилинди. Жами: {len(albums[user_id]['photos'])}"
         )
 
 
 def create_telegraph_page(full_text: str) -> str:
-    """Telegraph API orqali to'liq matnli maqola yaratadi."""
     access_token = TELEGRAPH_ACCESS_TOKEN
 
     if not access_token:
@@ -63,18 +61,18 @@ def create_telegraph_page(full_text: str) -> str:
         )
         account_response.raise_for_status()
         account_data = account_response.json()
+
         if not account_data.get("ok"):
             raise RuntimeError(
-                "Telegraph akkauntini yaratib bo'lmadi: "
-                + str(account_data.get("error", "noma'lum xato"))
+                "Telegraph аккаунти яратилмади: "
+                + str(account_data.get("error", "номаълум хато"))
             )
+
         access_token = account_data["result"]["access_token"]
 
-    # Telegraph sarlavhasi sifatida matnning birinchi qatoridan foydalanamiz.
     lines = [line.strip() for line in full_text.splitlines() if line.strip()]
     title = (lines[0] if lines else "Янги мақола")[:256]
 
-    # Matnni abzatslarga ajratamiz; matn oddiy matn sifatida yuboriladi.
     content = []
     for paragraph in full_text.splitlines():
         paragraph = paragraph.strip()
@@ -84,22 +82,108 @@ def create_telegraph_page(full_text: str) -> str:
     if not content:
         content = [{"tag": "p", "children": ["Матн берилмаган."]}]
 
-        response = requests.post(
+    response = requests.post(
         "https://api.telegra.ph/createPage",
         data={
             "access_token": access_token,
             "title": title,
             "author_name": "Adolat SDP Toshkent viloyati",
-            "content": __import__("json").dumps(content, ensure_ascii=False),
+            "content": json.dumps(content, ensure_ascii=False),
             "return_content": "false",
         },
         timeout=30,
     )
     response.raise_for_status()
     result = response.json()
+
     if not result.get("ok"):
         raise RuntimeError(
-            "Telegraph maqolasi yaratilmadi: "
-            + str(result.get("error", "noma'lum xato"))
+            "Telegraph мақоласи яратилмади: "
+            + str(result.get("error", "номаълум хато"))
         )
+
     return result["result"]["url"]
+
+
+async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    data = albums.get(user_id)
+
+    if not data:
+        await update.message.reply_text(
+            "Аввал матн ёки сурат юборинг."
+        )
+        return
+
+    text = data["text"].strip()
+    photos = data["photos"]
+
+    if not text and not photos:
+        await update.message.reply_text("Матн ёки сурат юборилмаган.")
+        return
+
+    if not CHANNEL_ID:
+        await update.message.reply_text("CHANNEL_ID созламаси топилмади.")
+        return
+
+    try:
+        article_url = None
+
+        if text:
+            article_url = await asyncio.to_thread(
+                create_telegraph_page, text
+            )
+
+        if text and article_url:
+            post_text = f"{text}\n\nТўлиқ мақола: {article_url}"
+        elif article_url:
+            post_text = f"Тўлиқ мақола: {article_url}"
+        else:
+            post_text = ""
+
+        if post_text:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=post_text[:4096],
+            )
+
+        if photos:
+            media = [
+                InputMediaPhoto(media=photo_id)
+                for photo_id in photos[:10]
+            ]
+            await context.bot.send_media_group(
+                chat_id=CHANNEL_ID,
+                media=media,
+            )
+
+        albums.pop(user_id, None)
+        await update.message.reply_text("Каналга жойланди!")
+
+    except Exception as error:
+        await update.message.reply_text(
+            f"Хатолик юз берди: {error}"
+        )
+
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN созламаси топилмади.")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("done", done))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
+    app.add_handler(MessageHandler(filters.PHOTO, handle_message))
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
