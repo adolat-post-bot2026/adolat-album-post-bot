@@ -45,33 +45,42 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not BOT_TOKEN or not CHANNEL_ID:
         await update.message.reply_text("Бот созламалари тўлиқ эмас.")
-        return
+                  return 
+        try:
+            text = data["text"].strip()
+            photos = data["photos"]
 
-    try:
-        if data["text"].strip():
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=data["text"].strip()
+            if text:
+                text_message = await context.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=text
+                )
+            else:
+                text_message = None
+
+            if photos:
+                media = [
+                    InputMediaPhoto(media=photo_id)
+                    for photo_id in photos[:10]
+                ]
+
+                await context.bot.send_media_group(
+                    chat_id=CHANNEL_ID,
+                    media=media,
+                    reply_to_message_id=(
+                        text_message.message_id if text_message else None
+                    )
+                )
+
+           
+            albums.pop(user_id, None)
+            await update.message.reply_text("Каналга жойланди!")
+
+        except Exception as error:
+            await update.message.reply_text(
+                f"Жойлашда хато юз берди: {error}"
             )
 
-        photos = data["photos"]
-        if photos:
-            media = [
-                InputMediaPhoto(media=photo_id)
-                for photo_id in photos[:10]
-            ]
-            await context.bot.send_media_group(
-                chat_id=CHANNEL_ID,
-                media=media
-            )
-
-        albums.pop(user_id, None)
-        await update.message.reply_text("Каналга жойланди!")
-
-    except Exception as error:
-        await update.message.reply_text(
-            f"Жойлашда хато юз берди: {error}"
-        )
 
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
