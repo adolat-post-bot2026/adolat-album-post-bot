@@ -1,128 +1,96 @@
+import os
+import asyncio
+import html
+import requests
+
+from telegram import Update, InputMediaPhoto
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+TELEGRAPH_ACCESS_TOKEN = os.getenv("TELEGRAPH_ACCESS_TOKEN", "").strip()
+
+# Har bir foydalanuvchi yuborgan matn va suratlarni vaqtincha saqlash
+albums = {}
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Аввал тўлиқ матнни юборинг, кейин 1–10 тагача сурат юборинг. "
+        "Тугатгач /done буйруғини беринг. "
+        "Матн Telegraph мақоласига жойланади, каналга суратлар ва мақола ҳаволаси чиқади."
     )
-    response.raise_for_status()
-    result = response.json()
-    if not result.get("ok"):
-        raise RuntimeError(
-            "Telegraph мақоласини яратиб бўлмади: "
-            + str(result.get("error", "номаълум хато"))
-        )
-    return result["result"]["url"]
 
 
-async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user:
         return
 
     user_id = update.effective_user.id
-    data = albums.get(user_id)
+    message = update.message
 
-    if not data or (not data["text"].strip() and not data["photos"]):
-        await update.message.reply_text("Аввал матн ёки сурат юборинг.")
-        return
+    if user_id not in albums:
+        albums[user_id] = {"text": "", "photos": []}
 
-    if not BOT_TOKEN or not CHANNEL_ID:
-        await update.message.reply_text(
-            "Бот созламалари тўлиқ эмас. BOT_TOKEN ва CHANNEL_ID ни текширинг."
+    if message.text:
+        albums[user_id]["text"] += message.text + "\n"
+        await message.reply_text("Матн қабул қилинди.")
+    elif message.photo:
+        albums[user_id]["photos"].append(message.photo[-1].file_id)
+        await message.reply_text(
+            f"Сурат қабул қилинди. Жами суратлар: {len(albums[user_id]['photos'])}"
         )
-        return
 
-    text = data["text"].strip()
-    photos = data["photos"]
 
-    if not text:
-        await update.message.reply_text(
-            "Илтимос, аввал мақола матнини ҳам юборинг."
+def create_telegraph_page(full_text: str) -> str:
+    """Telegraph API orqali to'liq matnli maqola yaratadi."""
+    access_token = TELEGRAPH_ACCESS_TOKEN
+
+    if not access_token:
+        account_response = requests.post(
+            "https://api.telegra.ph/createAccount",
+            data={
+                "short_name": "AdolatPostBot",
+                "author_name": "Adolat SDP Toshkent viloyati",
+            },
+            timeout=30,
         )
-        return
-
-    status = await update.message.reply_text(
-        "Мақола тайёрланяпти. Бироз кутинг..."
-    )
-
-    try:
-        # Telegraph API синхрон бўлгани учун алоҳида оқимда ишлатамиз.
-        article_url = await asyncio.to_thread(create_telegraph_page, text)
-
-        # Альбомга тўлиқ матн эмас, мақола ҳаволаси ва қисқа сарлавҳа қўшилади.
-        title = next((line.strip() for line in text.splitlines() if line.strip()), "Янги мақола")
-        caption = f"{title[:700]}\n\nТўлиқ мақола: {article_url}"
-        caption = caption[:1024]
-
-        if photos:
-            # Telegram media group bir yuborishda 2–10 ta surat oladi.
-            # Birinchi albomga sarlavha va Telegraph havolasi biriktiriladi.
-            first_batch = photos[:10]
-            if len(first_batch) == 1:
-                await context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=first_batch[0],
-                    caption=caption,
-                )
-            else:
-                media = [
-                    InputMediaPhoto(
-                        media=photo_id,
-                        caption=caption if index == 0 else None,
-                    )
-                    for index, photo_id in enumerate(first_batch)
-                ]
-                await context.bot.send_media_group(
-                    chat_id=CHANNEL_ID,
-                    media=media,
-                )
-
-            # 10 tadan ortiq surat bo'lsa, qolganlarini keyingi albomlarga yuboramiz.
-            remaining = photos[10:]
-            while remaining:
-                batch = remaining[:10]
-                if len(batch) == 1:
-                    await context.bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=batch[0],
-                    )
-                else:
-                    await context.bot.send_media_group(
-                        chat_id=CHANNEL_ID,
-                        media=[InputMediaPhoto(media=photo_id) for photo_id in batch],
-                    )
-                remaining = remaining[10:]
-        else:
-            # Surat bo'lmasa, kanalga maqola havolasini matn ko'rinishida yuboramiz.
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=f"{title[:700]}\n\nТўлиқ мақола: {article_url}",
-                disable_web_page_preview=False,
+        account_response.raise_for_status()
+        account_data = account_response.json()
+        if not account_data.get("ok"):
+            raise RuntimeError(
+                "Telegraph akkauntini yaratib bo'lmadi: "
+                + str(account_data.get("error", "noma'lum xato"))
             )
+        access_token = account_data["result"]["access_token"]
 
-        albums.pop(user_id, None)
-        await status.edit_text(
-            "Каналга жойланди! Суратлар постда, тўлиқ матн эса Telegraph ҳаволасида."
-        )
+    # Telegraph sarlavhasi sifatida matnning birinchi qatoridan foydalanamiz.
+    lines = [line.strip() for line in full_text.splitlines() if line.strip()]
+    title = (lines[0] if lines else "Янги мақола")[:256]
 
-    except Exception as error:
-        await status.edit_text(
-            "Жойлашда хато юз берди. Қуйидаги хабарни текширинг:\n"
-            f"{str(error)[:1200]}"
-        )
+    # Matnni abzatslarga ajratamiz; matn oddiy matn sifatida yuboriladi.
+    content = []
+    for paragraph in full_text.splitlines():
+        paragraph = paragraph.strip()
+        if paragraph:
+            content.append({"tag": "p", "children": [paragraph]})
 
+    if not content:
+        content = [{"tag": "p", "children": ["Матн берилмаган."]}]
 
-async def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN муҳит ўзгарувчиси киритилмаган.")
-
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("done", done))
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT & ~filters.COMMAND) | filters.PHOTO,
-            handle_message,
-        )
-    )
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await asyncio.Event().wait()
-
-
+    response = requests.post(
+        "https://api.telegra.ph/createPage",
+        data={
+            "access_token": access_token,
+            "title": title,
+            "author_name": "Adolat SDP Toshkent viloyati",
+            "content": __import__("json").dumps(content, ensure_ascii=False),
+            "return_content": "false",
+        },
+        timeout=30,
