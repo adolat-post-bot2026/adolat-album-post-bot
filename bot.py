@@ -137,28 +137,38 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 create_telegraph_page, text
             )
 
+        
         if text and article_url:
-            post_text = f"{text}\n\nТўлиқ мақола: {article_url}"
+            short_text = text[:700].strip()
+            post_text = f"{short_text}\n\nТўлиқ мақола: {article_url}"
         elif article_url:
             post_text = f"Тўлиқ мақола: {article_url}"
         else:
-            post_text = ""
+            post_text = text[:700].strip()
 
-        if post_text:
+        if photos:
+            media = []
+            for index, photo_id in enumerate(photos[:10]):
+                if index == 0:
+                    media.append(
+                        InputMediaPhoto(
+                            media=photo_id,
+                            caption=post_text[:1024] if post_text else None
+                        )
+                    )
+                else:
+                    media.append(InputMediaPhoto(media=photo_id))
+
+            await context.bot.send_media_group(
+                chat_id=CHANNEL_ID,
+                media=media,
+            )
+        elif post_text:
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
                 text=post_text[:4096],
             )
 
-        if photos:
-            media = [
-                InputMediaPhoto(media=photo_id)
-                for photo_id in photos[:10]
-            ]
-            await context.bot.send_media_group(
-                chat_id=CHANNEL_ID,
-                media=media,
-            )
 
         albums.pop(user_id, None)
         await update.message.reply_text("Каналга жойланди!")
