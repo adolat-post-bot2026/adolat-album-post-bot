@@ -94,3 +94,339 @@ def create_telegraph_page(full_text: str) -> str:
         content = [{"tag": "p", "children": ["Матн берилмаган."]}]
 
     response = requests.post(
+        "https://api.telegra.ph/createPage",
+        data={
+            "access_token": access_token,
+            "title": title,
+            "author_name": "Adolat SDP Toshkent viloyati",
+            "content": json.dumps(content, ensure_ascii=False),
+            "return_content": "false",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    result = response.json()
+
+    if not result.get("ok"):
+        raise RuntimeError(
+            "Telegraph мақоласи яратилмади: "
+            + str(result.get("error", "номаълум хато"))
+        )
+
+    return result["result"]["url"]
+
+
+def generate_ai_draft(source_text: str) -> dict:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY созланмаган. FadeHost муҳитида ушбу ўзгарувчини текширинг."
+        )
+
+    prompt = f"""
+Сиз ўзбек тилида ишлайдиган тажрибали журналист ва муҳаррирсиз.
+Қуйидаги манба матнини ўзбек кирилл ёзувида таҳрирланг.
+
+ҚАТЪИЙ ҚОИДАЛАР:
+- Манбада йўқ исм, сана, жой, рақам, лавозим, иқтибос ёки фактни қўшманг.
+- Ноаниқ маълумотни ўзингизча тўлдирманг.
+- Мазмунни бузманг; имло, услуб ва журналистик равонликни яхшиланг.
+- Матнни ўзбек кирилл алифбосида ёзинг. Лотин ёзувидаги ўзбекча матн қолдирманг.
+- Қуйидаги уч қисмни JSON шаклида қайтаринг:
+  "article": тўлиқ таҳрирланган журналистик мақола,
+  "short_post": Telegram учун қисқа пост,
+  "headlines": 3 тадан 5 тагача сарлавҳа варианти.
+- Фақат ҳақиқий JSON қайтаринг, Markdown ёки изоҳ қўшманг.
+
+МАНБА МАТНИ:
+{source_text}
+""".strip()
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://t.me/Adolat_Toshvil_post_bot",
+            "X-Title": "Adolat SDP Journalist Editor",
+        },
+        json={
+            "model": OPENROUTER_MODEL or "openrouter/free",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Фақат JSON объект қайтаринг. Манбада бўлмаган фактларни қўшманг.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+        },
+        timeout=90,
+    )
+
+    if not response.ok:
+        try:
+            detail = response.json().get("error", {}).get("message", response.text)
+        except Exception:
+            detail = response.text
+        raise RuntimeError(f"OpenRouter хатоси ({response.status_code}): {detail[:500]}")
+
+    payload = response.json()
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError("AI жавоб қайтармади.")
+
+    content = choices[0].get("message", {}).get("content", "")
+    if isinstance(content, list):
+        content = "".join(
+            item.get("text", "") for item in content if isinstance(item, dict)
+        )
+    content = str(content).strip()
+    if content.startswith("```"):
+        content = content.replace("```json", "", 1).replace("```", "").strip()
+
+    try:
+        draft = json.loads(content)
+    except json.JSONDecodeError:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start >= 0 and end > start:
+            draft = json.loads(content[start:end + 1])
+        else:
+            raise RuntimeError("AI жавоби JSON шаклида эмас. Қайта уриниб кўринг.")
+
+    article = str(draft.get("article", "")).strip()
+    short_post = str(draft.get("short_post", "")).strip()
+    headlines = draft.get("headlines", [])
+    if isinstance(headlines, str):
+        headlines = [line.strip(" -*•\t") for line in headlines.splitlines() if line.strip()]
+    if not isinstance(headlines, list):
+        headlines = []
+    headlines = [str(item).strip() for item in headlines if str(item).strip()][:5]
+
+    if not article or not short_post:
+        raise RuntimeError("AI жавобида мақола ёки қисқа пост етишмаяпти.")
+
+    return {
+        "article": article,
+        "short_post": short_post,
+        "headlines": headlines[:5],
+    }
+
+
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    data = albums.get(user_id, {})
+    source_text = str(data.get("text", "")).strip()
+
+    if not source_text:
+        await update.message.reply_text(
+            "Аввал мақоланинг тўлиқ матнини юборинг, кейин /ai буйруғини беринг."
+        )
+        return
+
+    if not OPENROUTER_API_KEY:
+        await update.message.reply_text(
+            "AI калити топилмади. FadeHost муҳитида OPENROUTER_API_KEY ўзгарувчиси борлигини текширинг."
+        )
+        return
+
+    await update.message.reply_text("AI журналист матнни таҳрирламоқда. Бироз кутинг...")
+    try:
+        draft = await asyncio.to_thread(generate_ai_draft, source_text)
+        pending_drafts[user_id] = draft
+
+        headlines = "\n".join(
+            f"{index}. {headline}"
+            for index, headline in enumerate(draft["headlines"], start=1)
+        ) or "Сарлавҳа вариантлари берилмади."
+
+        preview = (
+            "📝 AI журналист таҳрири тайёр\n\n"
+            "САРЛАВҲА ВАРИАНТЛАРИ:\n"
+            f"{headlines}\n\n"
+            "ҚИСҚА TELEGRAM ПОСТИ:\n"
+            f"{draft['short_post']}\n\n"
+            "ТЎЛИҚ МАҚОЛА:\n"
+            f"{draft['article'][:2500]}"
+        )
+        if len(draft["article"]) > 2500:
+            preview += "\n\n…(мақоланинг давоми нашрда тўлиқ сақланади)"
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ Тасдиқлаш ва нашр этиш",
+                    callback_data="ai_approve",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Бекор қилиш",
+                    callback_data="ai_cancel",
+                )
+            ],
+        ])
+        await update.message.reply_text(
+            preview[:4000],
+            reply_markup=keyboard,
+        )
+    except Exception as error:
+        await update.message.reply_text(f"AI матн тайёрлай олмади: {error}")
+
+
+async def ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    user_id = query.from_user.id
+    draft = pending_drafts.get(user_id)
+
+    if query.data == "ai_cancel":
+        pending_drafts.pop(user_id, None)
+        await query.answer("Таҳрир бекор қилинди.")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("AI таҳрири бекор қилинди. Каналга ҳеч нарса жойланмади.")
+        except Exception:
+            pass
+        return
+
+    if query.data != "ai_approve":
+        await query.answer()
+        return
+
+    if not draft:
+        await query.answer("Тасдиқлаш учун сақланган матн топилмади.", show_alert=True)
+        return
+
+    if not CHANNEL_ID:
+        await query.answer("CHANNEL_ID созламаси топилмади.", show_alert=True)
+        return
+
+    await query.answer("Нашр тайёрланмоқда...")
+    data = albums.get(user_id, {"photos": []})
+    photos = data.get("photos", [])
+
+    try:
+        article_url = await asyncio.to_thread(create_telegraph_page, draft["article"])
+        caption = f"{draft['short_post']}\n\nТўлиқ мақола: {article_url}"
+
+        if photos:
+            media = []
+            for index, photo_id in enumerate(photos[:10]):
+                if index == 0:
+                    media.append(
+                        InputMediaPhoto(
+                            media=photo_id,
+                            caption=caption[:1024],
+                        )
+                    )
+                else:
+                    media.append(InputMediaPhoto(media=photo_id))
+            await context.bot.send_media_group(chat_id=CHANNEL_ID, media=media)
+        else:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=caption[:4096])
+
+        pending_drafts.pop(user_id, None)
+        albums.pop(user_id, None)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("✅ Тасдиқланди ва каналга нашр этилди!")
+        except Exception:
+            pass
+    except Exception as error:
+        await query.message.reply_text(
+            f"Нашр қилишда хатолик юз берди: {error}\n"
+            "Матн тасдиқланган ҳолда сақланди; хатони тузатиб, яна уриниб кўриш мумкин."
+        )
+
+
+async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    data = albums.get(user_id)
+
+    if not data:
+        await update.message.reply_text("Аввал матн ёки сурат юборинг.")
+        return
+
+    text = data["text"].strip()
+    photos = data["photos"]
+
+    if not text and not photos:
+        await update.message.reply_text("Матн ёки сурат юборилмаган.")
+        return
+
+    if not CHANNEL_ID:
+        await update.message.reply_text("CHANNEL_ID созламаси топилмади.")
+        return
+
+    try:
+        article_url = None
+        if text:
+            article_url = await asyncio.to_thread(create_telegraph_page, text)
+
+        if text and article_url:
+            short_text = text[:700].strip()
+            post_text = f"{short_text}\n\nТўлиқ мақола: {article_url}"
+        elif article_url:
+            post_text = f"Тўлиқ мақола: {article_url}"
+        else:
+            post_text = text[:700].strip()
+
+        if photos:
+            media = []
+            for index, photo_id in enumerate(photos[:10]):
+                if index == 0:
+                    media.append(
+                        InputMediaPhoto(
+                            media=photo_id,
+                            caption=post_text[:1024] if post_text else None
+                        )
+                    )
+                else:
+                    media.append(InputMediaPhoto(media=photo_id))
+
+            await context.bot.send_media_group(
+                chat_id=CHANNEL_ID,
+                media=media,
+            )
+        elif post_text:
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=post_text[:4096],
+            )
+
+        albums.pop(user_id, None)
+        await update.message.reply_text("Каналга жойланди!")
+
+    except Exception as error:
+        await update.message.reply_text(f"Хатолик юз берди: {error}")
+
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN созламаси топилмади.")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("done", done))
+    app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(CallbackQueryHandler(ai_callback, pattern=r"^ai_(approve|cancel)$"))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
+    app.add_handler(MessageHandler(filters.PHOTO, handle_message))
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
