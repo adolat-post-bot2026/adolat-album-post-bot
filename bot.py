@@ -225,6 +225,108 @@ def generate_ai_draft(source_text: str) -> dict:
     }
 
 
+def proofread_ai_draft(source_text: str, draft: dict) -> dict:
+    """Second editorial pass: fix language and logic without inventing facts."""
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY созланмаган. FadeHost муҳитида ушбу ўзгарувчини текширинг."
+        )
+
+    prompt = f"""
+Сиз биринчи таҳрирдан ўтган журналистик матнни нашр олдидан текширадиган катта муҳаррирсиз.
+Вазифангиз — матнни қайтадан узайтириш эмас, унинг тили ва мантиғини пухта таҳрир қилиш.
+
+ҚАТЪИЙ ТАЛАБЛАР:
+1. Фақат ўзбек кирилл алифбосида, табиий ва равон адабий тилда ёзинг.
+2. Имло, грамматика, келишик, сўз танлаш ва жумлалар қурилишини тузатинг.
+3. Маъноси ноаниқ, сунъий, таржимадан чиққанга ўхшаш ёки мантиқан нотўғри жумлаларни табиий қилиб қайта ёзинг.
+4. Бир фикрни такрорлайдиган жумлалар ва мазмунсиз умумий гапларни олиб ташланг.
+5. Ҳар бир абзац аниқ маълумот берсин. Мақолани ҳажм учун сунъий равишда узайтирманг.
+6. Фақат МАНБА МАТНИда тасдиқланган фактларни сақланг. Қатнашчилар, ташкилотчилар, саналар, манзиллар, иқтибослар, қарорлар ва натижаларни ўйлаб топманг.
+7. Биринчи лойиҳада пайдо бўлган, аммо манбада тасдиқланмаган даъво ёки тафсилотларни олиб ташланг.
+8. М. Бердиқулова, Ж. Номозов каби номлар, мактаб рақами ва бошқа маълумотларни манбадаги шаклда сақланг; янги маълумот қўшманг.
+9. Сарлавҳалар аниқ, табиий ва бир-биридан фарқли бўлсин. Қисқа пост 2–3 гапдан иборат бўлсин.
+10. Мақола 500–700 сўз бўлиши мақсад қилинади, аммо манба маълумоти кам бўлса, такрор ёки тахмин билан ҳажмни тўлдирманг.
+11. Жавобни фақат тўғри JSON шаклида қайтаринг: {{"article":"...", "short_post":"...", "headlines":["...", "..."]}}. Markdown ёки изоҳ қўшманг.
+
+АСЛ МАНБА:
+{source_text}
+
+БИРИНЧИ ЛОЙИҲА:
+{json.dumps(draft, ensure_ascii=False)}
+""".strip()
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://t.me/Adolat_Toshvil_post_bot",
+            "X-Title": "Adolat SDP Journalist Proofreader",
+        },
+        json={
+            "model": OPENROUTER_MODEL or "openrouter/free",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Сиз фактларга содиқ ўзбек тили муҳарририсиз. Фақат JSON қайтаринг.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+        },
+        timeout=90,
+    )
+
+    if not response.ok:
+        try:
+            detail = response.json().get("error", {}).get("message", response.text)
+        except Exception:
+            detail = response.text
+        raise RuntimeError(
+            f"AI иккинчи таҳрир босқичида хато ({response.status_code}): {detail[:400]}"
+        )
+
+    payload = response.json()
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError("AI иккинчи таҳрир босқичида жавоб қайтармади.")
+
+    content = choices[0].get("message", {}).get("content", "")
+    if isinstance(content, list):
+        content = "".join(
+            item.get("text", "") for item in content if isinstance(item, dict)
+        )
+    content = str(content).strip()
+    if content.startswith("```"):
+        content = content.replace("```json", "", 1).replace("```", "").strip()
+
+    try:
+        reviewed = json.loads(content)
+    except json.JSONDecodeError:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start < 0 or end <= start:
+            raise RuntimeError("AI иккинчи таҳрир жавоби JSON шаклида эмас.")
+        reviewed = json.loads(content[start:end + 1])
+
+    article = str(reviewed.get("article", "")).strip()
+    short_post = str(reviewed.get("short_post", "")).strip()
+    headlines = reviewed.get("headlines", [])
+    if isinstance(headlines, str):
+        headlines = [
+            line.strip(" -*•\t") for line in headlines.splitlines() if line.strip()
+        ]
+    if not isinstance(headlines, list):
+        headlines = []
+    headlines = [str(item).strip() for item in headlines if str(item).strip()][:5]
+
+    if not article or not short_post:
+        raise RuntimeError("AI иккинчи таҳрир натижасида мақола ёки қисқа пост йўқ.")
+
+    return {"article": article, "short_post": short_post, "headlines": headlines}
+
+
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not update.message:
         return
@@ -248,6 +350,15 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("AI журналист матнни таҳрирламоқда. Бироз кутинг...")
     try:
         draft = await asyncio.to_thread(generate_ai_draft, source_text)
+        # Иккинчи босқич: имло, мантиқ, такрор ва фактларга содиқликни текшириш.
+        try:
+            draft = await asyncio.to_thread(proofread_ai_draft, source_text, draft)
+        except Exception as review_error:
+            # Иккинчи босқич ишламаса ҳам биринчи лойиҳа йўқолмасин; фойдаланувчига хабар берилади.
+            await update.message.reply_text(
+                "Эслатма: автоматик иккинчи таҳрир босқичи ишламади; "
+                f"биринчи лойиҳа текширувсиз кўрсатилади. Сабаб: {review_error}"
+            )
         pending_drafts[user_id] = draft
 
         headlines = "\n".join(
